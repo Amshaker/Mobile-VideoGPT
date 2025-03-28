@@ -1,0 +1,6 @@
+theme: jekyll-theme-slate
+title: Mobile-VideoGPT
+description: Fast and Accurate Video Understanding Language Model
+
+head:
+  - "<link rel='stylesheet' href='/custom.css'>"
