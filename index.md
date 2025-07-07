@@ -30,7 +30,7 @@ We propose Mobile-VideoGPT, an efficient multimodal framework designed to operat
 ## 📊 Evaluation Summary on 6 benchmarks:
 
 <p align="center">
-  <img src="docs/images/Intro_figure_2.png" alt="Contributions" style="width: 600px; height: auto;">
+  <img src="docs/images/Intro_figure_3.png" alt="Contributions" style="width: 600px; height: auto;">
 </p>
 
 ## 🛠️ Installation 
