@@ -65,8 +65,8 @@ Install [VideoMamba](https://github.com/OpenGVLab/VideoMamba). VideoMamba is the
 ```shell
 git clone https://github.com/OpenGVLab/VideoMamba
 cd VideoMamba
-pip install -e causal-conv1d
-pip install -e mamba
+pip install ./causal-conv1d
+pip install ./mamba
 ```
 Additionally, install [FlashAttention](https://github.com/HazyResearch/flash-attention) for training,
 ```shell
