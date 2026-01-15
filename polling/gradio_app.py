@@ -10,6 +10,8 @@ import json
 import time
 import glob
 import logging
+import subprocess
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from typing import List, Tuple, Optional
@@ -59,10 +61,59 @@ class GradioPollingApp:
         self.log_capture = LogCapture()
         self.log_capture.setLevel(logging.INFO)
         self.log_capture.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
+        self.temp_dir = None
+        self.current_video_path = None
 
         # Add log capture to root logger
         logging.getLogger().addHandler(self.log_capture)
         logging.getLogger().setLevel(logging.INFO)
+
+    def extract_video_segment(self, video_path: str, start_time: float, duration: float) -> str:
+        """Extract video segment starting at specific time using FFmpeg"""
+        try:
+            # Create output path in temp directory
+            output_path = os.path.join(self.temp_dir, f"segment_{start_time:.1f}s.mp4")
+
+            # Use FFmpeg to extract segment
+            cmd = [
+                'ffmpeg',
+                '-y',  # Overwrite output file
+                '-ss', str(start_time),  # Start time
+                '-i', video_path,  # Input file
+                '-t', str(duration),  # Duration
+                '-c', 'copy',  # Copy codec (fast)
+                '-avoid_negative_ts', 'make_zero',  # Fix timestamp issues
+                '-loglevel', 'error',  # Suppress output
+                output_path
+            ]
+
+            subprocess.run(cmd, check=True, capture_output=True)
+            return output_path
+
+        except subprocess.CalledProcessError as e:
+            logging.warning(f"FFmpeg copy failed, trying re-encode: {e}")
+            try:
+                # Fallback: re-encode if copy fails
+                cmd = [
+                    'ffmpeg',
+                    '-y',
+                    '-ss', str(start_time),
+                    '-i', video_path,
+                    '-t', str(duration),
+                    '-c:v', 'libx264',  # Re-encode video
+                    '-preset', 'ultrafast',  # Fast encoding
+                    '-c:a', 'aac',  # Re-encode audio
+                    '-loglevel', 'error',
+                    output_path
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
+                return output_path
+            except Exception as e2:
+                logging.error(f"Failed to extract segment: {e2}")
+                return video_path  # Return original on failure
+        except Exception as e:
+            logging.error(f"Error extracting segment: {e}")
+            return video_path
 
     def get_sample_videos(self) -> List[str]:
         """Get list of videos from sample_videos folder"""
@@ -99,7 +150,7 @@ class GradioPollingApp:
             return "No session metrics available"
 
         output = []
-        output.append("📈 **Session Summary**\n")
+        output.append("**Session Summary**\n")
         output.append(f"**Session ID:** {session_metrics.get('session_id', 'N/A')}")
         output.append(f"**Duration:** {session_metrics.get('duration_seconds', 0):.2f}s")
         output.append(f"**Total Polls:** {session_metrics.get('total_polls', 0)}")
@@ -121,7 +172,7 @@ class GradioPollingApp:
             return "No responses yet"
 
         output = []
-        output.append("💬 **All Poll Responses**\n")
+        output.append("**All Poll Responses**\n")
         output.append("=" * 60 + "\n")
 
         for i, result in enumerate(results, 1):
@@ -152,13 +203,24 @@ class GradioPollingApp:
             self.is_running = True
             self.current_session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+            # Create temp directory for video segments
+            if self.temp_dir:
+                try:
+                    import shutil
+                    shutil.rmtree(self.temp_dir)
+                except:
+                    pass
+            self.temp_dir = tempfile.mkdtemp(prefix="polling_segments_")
+
             # Determine video path
             if use_webcam:
                 video_path = "0"  # Webcam
+                self.current_video_path = video_path
                 progress(0, desc="Opening webcam...")
             else:
                 project_root = Path(__file__).parent.parent
                 video_path = str(project_root / "sample_videos" / video_source)
+                self.current_video_path = video_path
 
                 if not os.path.exists(video_path):
                     yield (
@@ -199,8 +261,8 @@ class GradioPollingApp:
                 logging.error("Failed to load model")
                 yield (
                     video_path if use_webcam else video_path,
-                    "❌ **Error**",
-                    "❌ Failed to load model",
+                    "**Error**",
+                    "Failed to load model",
                     "Error: Could not load model",
                     "",
                     self.log_capture.get_logs()
@@ -220,8 +282,8 @@ class GradioPollingApp:
                 logging.error("Failed to open video source")
                 yield (
                     video_path,
-                    "❌ **Error**",
-                    "❌ Failed to open video",
+                    "**Error**",
+                    "Failed to open video",
                     "Error: Could not open video source",
                     "",
                     self.log_capture.get_logs()
@@ -234,11 +296,11 @@ class GradioPollingApp:
             total_duration = self.engine.stream_handler.total_duration
             poll_index = 0
 
-            # Yield initial state with video loaded (only set video once to avoid interrupting playback)
+            # Yield initial state with video loaded
             yield (
                 video_path,
-                f"🔴 **Analysis Position:** 0:00 / {int(total_duration//60)}:{int(total_duration%60):02d}",
-                "🔄 Starting polling...",
+                f"**Analysis Position:** 0:00 / {int(total_duration//60)}:{int(total_duration%60):02d}",
+                "Starting polling...",
                 "Initializing...",
                 "",
                 self.log_capture.get_logs()
@@ -326,10 +388,17 @@ class GradioPollingApp:
                     current_sec = int(position % 60)
                     total_min = int(total_duration // 60)
                     total_sec = int(total_duration % 60)
-                    timestamp = f"🔴 **Analysis Position:** {current_min}:{current_sec:02d} / {total_min}:{total_sec:02d} (Poll #{poll_index + 1})"
+                    timestamp = f"**Analysis Position:** {current_min}:{current_sec:02d} / {total_min}:{total_sec:02d} (Poll #{poll_index + 1})"
+
+                    # Extract video segment for this poll
+                    segment_path = self.extract_video_segment(
+                        self.current_video_path,
+                        position,
+                        config.polling_interval
+                    )
 
                     yield (
-                        gr.skip(),  # Don't update video player to avoid interrupting playback
+                        segment_path,  # Show segment at poll position
                         timestamp,
                         current_response,
                         current_metrics,
@@ -349,12 +418,12 @@ class GradioPollingApp:
                     current_sec = int(position % 60) if 'position' in locals() else 0
                     total_min = int(total_duration // 60)
                     total_sec = int(total_duration % 60)
-                    timestamp = f"❌ **Error at:** {current_min}:{current_sec:02d} / {total_min}:{total_sec:02d}"
+                    timestamp = f"**Error at:** {current_min}:{current_sec:02d} / {total_min}:{total_sec:02d}"
 
                     yield (
-                        gr.skip(),  # Don't update video player
+                        video_path,  # Reload video
                         timestamp,
-                        f"❌ Error in poll #{poll_index + 1}: {str(e)}",
+                        f"Error in poll #{poll_index + 1}: {str(e)}",
                         "Error occurred",
                         self.format_all_responses(self.poll_results),
                         self.log_capture.get_logs()
@@ -367,12 +436,12 @@ class GradioPollingApp:
 
             total_min = int(total_duration // 60)
             total_sec = int(total_duration % 60)
-            timestamp = f"✅ **Complete:** {total_min}:{total_sec:02d} / {total_min}:{total_sec:02d} ({poll_index} polls)"
+            timestamp = f"**Complete:** {total_min}:{total_sec:02d} / {total_min}:{total_sec:02d} ({poll_index} polls)"
 
             yield (
-                gr.skip(),  # Don't update video player
+                video_path,  # Keep video loaded
                 timestamp,
-                f"✅ **Polling Complete**\n\nProcessed {poll_index} polls successfully",
+                f"**Polling Complete**\n\nProcessed {poll_index} polls successfully",
                 f"**Final Stats:**\n{poll_index} polls completed",
                 self.format_all_responses(self.poll_results),
                 self.log_capture.get_logs()
@@ -381,9 +450,9 @@ class GradioPollingApp:
         except Exception as e:
             logging.error(f"Fatal error: {str(e)}")
             yield (
-                gr.skip(),  # Don't update video player
-                "❌ **Fatal Error**",
-                f"❌ **Error:** {str(e)}",
+                video_path if 'video_path' in locals() else None,  # Keep video loaded
+                "**Fatal Error**",
+                f"**Error:** {str(e)}",
                 "Error occurred during inference",
                 "",
                 self.log_capture.get_logs()
@@ -393,6 +462,13 @@ class GradioPollingApp:
             self.is_running = False
             if self.engine:
                 self.engine.cleanup()
+            # Clean up temp directory
+            if self.temp_dir and os.path.exists(self.temp_dir):
+                try:
+                    import shutil
+                    shutil.rmtree(self.temp_dir)
+                except Exception as e:
+                    logging.warning(f"Failed to clean up temp directory: {e}")
 
     def stop_inference(self):
         """Stop current inference"""
@@ -406,13 +482,13 @@ def create_interface():
 
     with gr.Blocks(title="Mobile-VideoGPT Polling Inference", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
-        # 🎬 Mobile-VideoGPT Polling Inference
+        # Mobile-VideoGPT Polling Inference
         Real-time exercise form evaluation with LoRA adapters
         """)
 
         with gr.Row():
             with gr.Column(scale=1):
-                gr.Markdown("### 📹 Video Source")
+                gr.Markdown("### Video Source")
 
                 use_webcam = gr.Checkbox(
                     label="Use Webcam",
@@ -427,7 +503,7 @@ def create_interface():
                     info="Videos from sample_videos/ folder"
                 )
 
-                gr.Markdown("### 🤖 Model Configuration")
+                gr.Markdown("### Model Configuration")
 
                 base_model = gr.Textbox(
                     label="Base Model",
@@ -441,7 +517,7 @@ def create_interface():
                     info="HuggingFace LoRA adapter ID"
                 )
 
-                gr.Markdown("### ⚙️ Inference Parameters")
+                gr.Markdown("### Inference Parameters")
 
                 polling_interval = gr.Slider(
                     minimum=1,
@@ -496,15 +572,15 @@ def create_interface():
                 )
 
                 with gr.Row():
-                    start_btn = gr.Button("▶️ Start Polling", variant="primary", size="lg")
-                    stop_btn = gr.Button("⏹️ Stop", variant="stop", size="lg")
+                    start_btn = gr.Button("Start Polling", variant="primary", size="lg")
+                    stop_btn = gr.Button("Stop", variant="stop", size="lg")
 
             with gr.Column(scale=2):
-                gr.Markdown("### 🎬 Video Player")
+                gr.Markdown("### Video Player")
 
                 # Video timestamp indicator
                 video_timestamp = gr.Markdown(
-                    value="🔴 **Analysis Position:** 0:00 / 0:00",
+                    value="**Analysis Position:** 0:00 / 0:00",
                     elem_classes=["timestamp-box"]
                 )
 
@@ -516,7 +592,7 @@ def create_interface():
                     height=300
                 )
 
-                gr.Markdown("### 📊 Real-time Results")
+                gr.Markdown("### Real-time Results")
 
                 with gr.Row():
                     with gr.Column():
@@ -533,13 +609,13 @@ def create_interface():
                             elem_classes=["metrics-box"]
                         )
 
-                gr.Markdown("### 📝 All Responses")
+                gr.Markdown("### All Responses")
                 all_responses = gr.Markdown(
                     value="No responses yet",
                     elem_classes=["all-responses-box"]
                 )
 
-                gr.Markdown("###  Live Logs")
+                gr.Markdown("### Live Logs")
                 live_logs = gr.Textbox(
                     value="No logs yet",
                     lines=15,
