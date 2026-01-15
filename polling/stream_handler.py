@@ -100,8 +100,8 @@ class VideoStreamHandler:
             return False
 
         try:
-            # Suppress FFmpeg output and warnings
-            os.environ['FFREPORT'] = 'level=-8'
+            # Suppress FFmpeg output (no log files)
+            os.environ['FFREPORT'] = 'file=:level=-8'
 
             with suppress_stderr():
                 self._video_reader = VideoReader(video_path, ctx=cpu(0), num_threads=1)

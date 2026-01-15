@@ -18,6 +18,13 @@ warnings.filterwarnings("ignore")
 import torch
 from transformers import AutoTokenizer, AutoConfig
 
+# PyTorch optimizations for faster inference
+torch.set_float32_matmul_precision('high')  # Use TF32 on Ampere+ GPUs
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True  # Auto-tune kernels for input shapes
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -156,15 +163,19 @@ class PollingInferenceEngine:
                 kwargs['load_in_8bit'] = True
             elif self.config.load_4bit:
                 from transformers import BitsAndBytesConfig
-                kwargs['load_in_4bit'] = True
                 kwargs['quantization_config'] = BitsAndBytesConfig(
                     load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_compute_dtype=torch.bfloat16,  # Use bfloat16 for better precision
                     bnb_4bit_use_double_quant=True,
                     bnb_4bit_quant_type='nf4'
                 )
+                # Note: Flash Attention incompatible with 4-bit quantization
             else:
-                kwargs['torch_dtype'] = torch.float16
+                kwargs['torch_dtype'] = torch.bfloat16  # Use bfloat16 for better stability
+                try:
+                    kwargs['attn_implementation'] = 'flash_attention_2'  # Enable Flash Attention 2
+                except:
+                    self.logger.warning("Flash Attention 2 not available")
 
             # Load config from base model (LoRA adapters don't have config.json)
             self.logger.info("Loading model configuration from base model...")
@@ -180,14 +191,35 @@ class PollingInferenceEngine:
 
             # Load base model
             self.logger.info("Loading base model...")
-            self.model = MobileVideoGPTQwenForCausalLM.from_pretrained(
-                self.config.base_model_path,
-                low_cpu_mem_usage=False,
-                config=model_cfg,
-                num_select_k_frames_in_chunk=self.config.num_select_k_frames_in_chunk,
-                topk=self.config.topk,
-                **kwargs
-            )
+            try:
+                self.model = MobileVideoGPTQwenForCausalLM.from_pretrained(
+                    self.config.base_model_path,
+                    low_cpu_mem_usage=False,
+                    config=model_cfg,
+                    num_select_k_frames_in_chunk=self.config.num_select_k_frames_in_chunk,
+                    topk=self.config.topk,
+                    **kwargs
+                )
+            except Exception as quant_error:
+                if self.config.load_4bit or self.config.load_8bit:
+                    self.logger.warning(f"Quantization failed: {quant_error}")
+                    self.logger.info("Retrying without quantization...")
+                    # Fallback to FP16 without quantization
+                    kwargs = {'torch_dtype': torch.bfloat16}
+                    try:
+                        kwargs['attn_implementation'] = 'flash_attention_2'
+                    except:
+                        pass
+                    self.model = MobileVideoGPTQwenForCausalLM.from_pretrained(
+                        self.config.base_model_path,
+                        low_cpu_mem_usage=False,
+                        config=model_cfg,
+                        num_select_k_frames_in_chunk=self.config.num_select_k_frames_in_chunk,
+                        topk=self.config.topk,
+                        **kwargs
+                    )
+                else:
+                    raise
 
             # Resize token embeddings
             token_num, token_dim = self.model.lm_head.out_features, self.model.lm_head.in_features
@@ -266,6 +298,15 @@ class PollingInferenceEngine:
             self.model.to(self.config.device)
             self.model.eval()
 
+            # Compile model for faster inference (PyTorch 2.0+)
+            try:
+                self.logger.info("Compiling model with torch.compile()...")
+                self.model = torch.compile(self.model, mode="reduce-overhead")
+                self.logger.info("Model compiled successfully")
+            except Exception as e:
+                self.logger.warning(f"torch.compile() not available or failed: {e}")
+                self.logger.info("Proceeding without compilation")
+
             # Setup vision processors
             self.logger.info("Setting up vision processors...")
             vision_tower = self.model.get_vision_tower()
@@ -328,7 +369,7 @@ class PollingInferenceEngine:
         dummy_frames = [
             torch.zeros(
                 (3, self.config.image_resolution, self.config.image_resolution),
-                dtype=torch.float16,
+                dtype=torch.bfloat16,
                 device=self.config.device
             )
             for _ in range(self.config.num_frames)
@@ -337,7 +378,7 @@ class PollingInferenceEngine:
         dummy_context = [
             torch.zeros(
                 (3, self.config.image_resolution, self.config.image_resolution),
-                dtype=torch.float16,
+                dtype=torch.bfloat16,
                 device=self.config.device
             )
             for _ in range(self.config.num_context_images)
@@ -382,16 +423,16 @@ class PollingInferenceEngine:
         # Prepare input
         input_ids, stop_str = self.prepare_prompt(prompt, slice_len)
 
-        # Prepare frames
-        video_tensor = torch.stack(video_frames, dim=0).half().to(self.config.device)
-        context_tensor = torch.stack(context_frames, dim=0).half().to(self.config.device)
+        # Prepare frames with bfloat16 to match model dtype
+        video_tensor = torch.stack(video_frames, dim=0).to(dtype=torch.bfloat16, device=self.config.device)
+        context_tensor = torch.stack(context_frames, dim=0).to(dtype=torch.bfloat16, device=self.config.device)
 
         input_token_count = input_ids.shape[1]
 
         # Reset first token timer
         self._first_token_streamer.reset()
 
-        # Generate
+        # Generate with inference_mode (more efficient than no_grad)
         with torch.inference_mode():
             output_ids = self.model.generate(
                 input_ids,
@@ -400,7 +441,7 @@ class PollingInferenceEngine:
                 do_sample=self.config.do_sample,
                 num_beams=self.config.num_beams,
                 max_new_tokens=self.config.max_new_tokens,
-                use_cache=self.config.use_cache,
+                use_cache=True,  # Always use KV cache for faster generation
             )
 
         # Record first token time (approximate since we can't hook into generate)

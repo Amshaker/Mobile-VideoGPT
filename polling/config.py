@@ -38,7 +38,7 @@ class PollingConfig:
     use_cache: bool = True
 
     # Model loading options
-    load_4bit: bool = False
+    load_4bit: bool = False  # 4-bit incompatible with custom model architecture
     load_8bit: bool = False
     num_select_k_frames_in_chunk: int = 4
     topk: bool = True
