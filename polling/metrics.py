@@ -157,7 +157,7 @@ class MetricsTracker:
     Tracks and logs metrics for polling-based streaming inference.
     """
 
-    def __init__(self, log_dir: str = "logs/streaming", save_metrics: bool = True):
+    def __init__(self, log_dir: str = "logs/polling", save_metrics: bool = True):
         self.log_dir = log_dir
         self.save_metrics = save_metrics
         self.logger = logging.getLogger("MetricsTracker")

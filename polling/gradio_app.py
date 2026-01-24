@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Generator
 import threading
 import queue
 from io import StringIO
@@ -194,7 +194,7 @@ class GradioPollingApp:
         warmup_runs: int,
         prompt: str,
         progress=gr.Progress()
-    ) -> tuple:
+    ) -> Generator[Tuple[str, str, str, str, str, str], None, None]:
         """Run polling inference"""
         try:
             # Reset state
@@ -268,6 +268,13 @@ class GradioPollingApp:
                     self.log_capture.get_logs()
                 )
                 return
+
+            # Start metrics session
+            self.engine.metrics.start_session(
+                video_source=video_path,
+                prompt=prompt,
+                polling_interval=polling_interval
+            )
 
             # Run warmup
             if warmup_runs > 0:
@@ -434,6 +441,11 @@ class GradioPollingApp:
             progress(1.0, desc="Complete!")
             logging.info(f"Polling complete: {poll_index} polls processed")
 
+            # End metrics session and save
+            if self.engine:
+                summary = self.engine.metrics.end_session()
+                logging.info("Metrics and summary saved successfully")
+
             total_min = int(total_duration // 60)
             total_sec = int(total_duration % 60)
             timestamp = f"**Complete:** {total_min}:{total_sec:02d} / {total_min}:{total_sec:02d} ({poll_index} polls)"
@@ -449,6 +461,14 @@ class GradioPollingApp:
 
         except Exception as e:
             logging.error(f"Fatal error: {str(e)}")
+
+            # End session even on error
+            if self.engine:
+                try:
+                    self.engine.metrics.end_session()
+                except Exception as e2:
+                    logging.error(f"Failed to save metrics: {e2}")
+
             yield (
                 video_path if 'video_path' in locals() else None,  # Keep video loaded
                 "**Fatal Error**",
@@ -505,16 +525,24 @@ def create_interface():
 
                 gr.Markdown("### Model Configuration")
 
-                base_model = gr.Textbox(
+                base_model = gr.Dropdown(
+                    choices=[
+                        "Amshaker/Mobile-VideoGPT-0.5B",
+                        "Amshaker/Mobile-VideoGPT-1.5B"
+                    ],
                     label="Base Model",
                     value="Amshaker/Mobile-VideoGPT-0.5B",
-                    info="HuggingFace model ID"
+                    info="Select base model size (0.5B or 1.5B)"
                 )
 
-                lora_weights = gr.Textbox(
+                lora_weights = gr.Dropdown(
+                    choices=[
+                        "EdgeVLM-Labs/mobile-videogpt-finetune-2000",
+                        "EdgeVLM-Labs/qved-finetune-20260110_155349"
+                    ],
                     label="LoRA Weights",
                     value="EdgeVLM-Labs/mobile-videogpt-finetune-2000",
-                    info="HuggingFace LoRA adapter ID"
+                    info="Select LoRA adapter"
                 )
 
                 gr.Markdown("### Inference Parameters")

@@ -49,11 +49,11 @@ class PollingConfig:
 
     # Logging configuration
     log_level: str = "INFO"
-    log_dir: str = "logs/streaming"
+    log_dir: str = "logs/polling"
     save_metrics: bool = True
 
     # Output configuration
-    output_dir: str = "results/streaming"
+    output_dir: str = "results/polling"
     save_responses: bool = True
 
     def __post_init__(self):
