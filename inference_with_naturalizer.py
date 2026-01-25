@@ -1,3 +1,13 @@
+"""
+Inference with Feedback Naturalizer
+
+Runs MobileVideoGPT inference with natural feedback handling.
+Detects repetitive responses and provides varied phrases.
+
+Usage:
+    python inference_with_naturalizer.py
+"""
+
 import sys
 import os
 import warnings
@@ -11,13 +21,10 @@ logging.getLogger('transformers').setLevel(logging.CRITICAL)
 logging.getLogger('transformers.modeling_utils').setLevel(logging.CRITICAL)
 
 import torch
-from pathlib import Path
-from PIL import Image
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-
-sys.path.append("Mobile-VideoGPT")
-
 from mobilevideogpt.utils import preprocess_input
+from feedback_naturalizer import FeedbackNaturalizer
+
 
 def load_model(pretrained_path: str, device: str = "cuda"):
     """Loads the pre-trained model and tokenizer."""
@@ -43,9 +50,7 @@ def run_inference(model, tokenizer, video_path: str, prompt: str):
             input_ids,
             images=torch.stack(video_frames, dim=0).half().cuda(),
             context_images=torch.stack(context_frames, dim=0).half().cuda(),
-            do_sample=False,  # Use greedy decoding
-            # temperature=0,
-            # top_p=1,
+            do_sample=False,
             num_beams=1,
             max_new_tokens=1024,
             use_cache=True,
@@ -62,9 +67,39 @@ def main():
     pretrained_path = "Amshaker/Mobile-VideoGPT-0.5B"
     video_path = "sample_videos/00000340.mp4"
     prompt = "Please evaluate the exercise form shown. What mistakes, if any, are present, and what corrections would you recommend?"
+
+    # Load model
+    print("Loading MobileVideoGPT model...")
     model, tokenizer = load_model(pretrained_path)
-    output = run_inference(model, tokenizer, video_path, prompt)
-    print("🤖 Mobile-VideoGPT Output: ", output)
+    print("Model loaded!\n")
+
+    # Initialize feedback naturalizer
+    naturalizer = FeedbackNaturalizer(threshold=0.70)
+
+    # Test: Run inference 3 times on same video
+    print("=" * 60)
+    print("Test: Same video inferenced 3 times")
+    print("=" * 60)
+
+    for i in range(1, 4):
+        print(f"\n--- Inference {i} ---")
+
+        # Get raw output from model
+        raw_output = run_inference(model, tokenizer, video_path, prompt)
+
+        # Process through naturalizer
+        result = naturalizer.process(raw_output)
+
+        print(f"Raw Output: {raw_output[:80]}...")
+        print(f"Display:    {result['display']}")
+
+        if result['is_repeat']:
+            print(f"Status:     REPEAT #{result['repeat_count']} (similarity: {result['similarity']:.2f})")
+        else:
+            print("Status:     NEW")
+
+    print("\n" + "=" * 60)
+    print("Test complete!")
 
 
 if __name__ == "__main__":
