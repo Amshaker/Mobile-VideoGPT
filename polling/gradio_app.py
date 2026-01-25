@@ -30,6 +30,7 @@ from polling.config import PollingConfig
 from polling.inference_engine import PollingInferenceEngine
 from polling.stream_handler import VideoStreamHandler
 from polling.metrics import MetricsTracker
+from utils.feedback_naturalizer import FeedbackNaturalizer
 
 
 class LogCapture(logging.Handler):
@@ -54,6 +55,7 @@ class GradioPollingApp:
 
     def __init__(self):
         self.engine: Optional[PollingInferenceEngine] = None
+        self.naturalizer: Optional[FeedbackNaturalizer] = None
         self.is_running = False
         self.current_session_id = None
         self.poll_results = []
@@ -256,6 +258,10 @@ class GradioPollingApp:
             progress(0.1, desc="Loading model...")
             self.engine = PollingInferenceEngine(config)
 
+            # Initialize feedback naturalizer
+            progress(0.15, desc="Loading feedback naturalizer...")
+            self.naturalizer = FeedbackNaturalizer(threshold=0.70)
+
             # Load model to initialize processors
             if not self.engine.load_model():
                 logging.error("Failed to load model")
@@ -348,6 +354,17 @@ class GradioPollingApp:
                         video_frames, context_frames, prompt, slice_len
                     )
 
+                    # Process through naturalizer
+                    if self.naturalizer:
+                        nat_result = self.naturalizer.process(response)
+                        display_response = nat_result['display']
+                        is_repeat = nat_result['is_repeat']
+                        repeat_info = f" 🔄 Repeat #{nat_result['repeat_count']}" if is_repeat else " ✨ New"
+                    else:
+                        display_response = response
+                        is_repeat = False
+                        repeat_info = ""
+
                     # Validate token counts (ensure non-negative)
                     input_tokens = max(0, input_tokens) if input_tokens else 0
                     output_tokens = max(0, output_tokens) if output_tokens else 0
@@ -383,10 +400,10 @@ class GradioPollingApp:
                     self.metrics_history.append(metrics)
 
                     # Log poll completion
-                    logging.info(f"Poll #{poll_index + 1} complete: latency={metrics.get('latency_ms', 0):.1f}ms")
+                    logging.info(f"Poll #{poll_index + 1} complete: latency={metrics.get('latency_ms', 0):.1f}ms{repeat_info}")
 
                     # Format outputs
-                    current_response = f"**Poll #{poll_index + 1}** (Position: {position:.2f}s)\n\n{response}"
+                    current_response = f"**Poll #{poll_index + 1}** (Position: {position:.2f}s){repeat_info}\n\n{display_response}"
                     current_metrics = self.format_metrics(metrics)
                     all_responses = self.format_all_responses(self.poll_results)
 
@@ -482,6 +499,8 @@ class GradioPollingApp:
             self.is_running = False
             if self.engine:
                 self.engine.cleanup()
+            if self.naturalizer:
+                self.naturalizer.reset()
             # Clean up temp directory
             if self.temp_dir and os.path.exists(self.temp_dir):
                 try:
