@@ -23,7 +23,7 @@ logging.getLogger('transformers.modeling_utils').setLevel(logging.CRITICAL)
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from mobilevideogpt.utils import preprocess_input
-from feedback_naturalizer import FeedbackNaturalizer
+from utils.feedback_naturalizer import FeedbackNaturalizer
 
 
 def load_model(pretrained_path: str, device: str = "cuda"):
